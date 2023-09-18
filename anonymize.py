@@ -11,7 +11,7 @@ from tqdm import tqdm
 from shutil import which
 from pathlib import Path
 
-from bounds import Bounds
+from .bounds import Bounds
 from ultralytics import YOLO, settings
 from ultralytics.utils import MACOS, WINDOWS
 
@@ -28,9 +28,9 @@ class Anonymize:
 
         # Path settings
         self.source = './media/input_media'
-        os.mkdir(self.source) if not os.path.exists(self.source) else self.source + 'already exists'
+        os.makedirs(self.source) if not os.path.exists(self.source) else self.source + 'already exists'
         self.destination = './media/output_media'
-        os.mkdir(self.destination) if not os.path.exists(self.destination) else self.destination + 'already exists'
+        os.makedirs(self.destination) if not os.path.exists(self.destination) else self.destination + 'already exists'
         self.input_path = None
         self.output_path = None
         self.save_path = './runs'
@@ -86,8 +86,9 @@ class Anonymize:
                     Anonymize.setup_source(self)
                     Anonymize.apply_process(self, **kwargs)
             else:
-                self.input_path = kwargs['media_path'] if 'media_path' in kwargs else self.source
-                self.output_path = self.destination
+                media_path = kwargs['media_path'] if 'media_path' in kwargs else self.source
+                self.input_path = media_path
+                self.output_path = media_path[:-4].replace('input', 'output') + '_blurred' + media_path[-4:]
                 Anonymize.setup_source(self)
                 Anonymize.apply_process(self, **kwargs)
         else:
