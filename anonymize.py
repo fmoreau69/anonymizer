@@ -30,20 +30,15 @@ class Anonymize:
             print("Using CPU.")
 
         # Path settings
-        self.source = './media/input_media'
-        os.makedirs(self.source) if not os.path.exists(self.source) else self.source + 'already exists'
-        self.destination = './media/output_media'
-        os.makedirs(self.destination) if not os.path.exists(self.destination) else self.destination + 'already exists'
-        self.input_path = None  # "D:\LESCOT\INFORMATIQUE\DEVELOPPEMENT\DEEP_LEARNING\MEDIA_SOURCE\Img\Faces_01.jpg"
-        self.output_path = None
-        self.save_path = './runs'
-        self.models_dir = './models'
+        self.source, self.destination = './media/input_media', './media/output_media'
+        os.makedirs(self.source, exist_ok=True), os.makedirs(self.destination, exist_ok=True)
+        self.input_path, self.output_path = None, None
+        self.save_path, self.models_dir = './runs', './models'
         settings.update({'runs_dir': self.save_path, 'weights_dir': self.models_dir})
 
         # Model settings
         self.class_list = []
-        self.classes2blur = ['face', 'plate']
-        # self.classes2blur = ['person', 'car', 'truck', 'bus']
+        self.classes2blur = ['face', 'plate']  # ['person', 'car', 'truck', 'bus']
         self.model_name = None
         self.model_path = None
         self.model = None
@@ -104,8 +99,9 @@ class Anonymize:
         with imageio.get_reader(self.input_path) as reader:
             self.meta_data = reader.get_meta_data()
             if 'fps' in self.meta_data:
-                media_ext = (kwargs['media_ext'] if 'media_ext' in kwargs else '.mp4')
-                suffix, fourcc = ('.mp4', 'avc1') if MACOS else ('.avi', 'WMV2') if WINDOWS else ('.avi', 'MJPG')
+                file_ext = (kwargs['file_ext'] if 'file_ext' in kwargs else '.mp4')
+                suffix, fourcc = ('.mp4', 'avc1') if MACOS else (file_ext, 'MJPG') if WINDOWS else (file_ext, 'MJPG')
+                # suffix, fourcc = ('.mp4', 'avc1') if MACOS else ('.avi', 'WMV2') if WINDOWS else ('.avi', 'MJPG')
                 save_path = str(Path(self.output_path).with_suffix(suffix))
                 self.vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), self.meta_data['fps'],
                                                   (self.meta_data['size'][0], self.meta_data['size'][1]))
@@ -161,19 +157,19 @@ class Anonymize:
                     if label in classes2blur and float(d.conf) >= detection_threshold:
                         x, y = int(d.xyxy[0][0]), int(d.xyxy[0][1])
                         w, h = int(d.xyxy[0][2]) - x, int(d.xyxy[0][3]) - y
-                        bounds = Bounds(x, y, x + w, y + h).scale(im0.shape, roi_enlargement).expand(im0.shape, rounded_edges)
+                        bounds = Bounds(x, y, x+w, y+h).scale(im0.shape, roi_enlargement).expand(im0.shape, rounded_edges)
                         x, y, w, h = bounds.x_min, bounds.y_min, bounds.x_max - bounds.x_min, bounds.y_max - bounds.y_min
                         blur_area = im0[y:y + h, x:x + w]
                         if label == 'face' or label == 'person':
                             mask = np.zeros((h, w), dtype=np.uint8)
-                            center, axes = (w // 2, h // 2), (w // 2, h // 2)
+                            center, axes = (w//2, h//2), (w//2, h//2)
                             cv2.ellipse(mask, center, axes, 0, 0, 360, (255, 255, 255), thickness=-1)
                             im0_cropped = cv2.bitwise_and(blur_area, blur_area, mask=cv2.bitwise_not(mask))
                             blurred_area = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0, dst=mask)
                             blurred_area = cv2.addWeighted(im0_cropped, 0.5, blurred_area, 0.5, 0)
                         else:
                             blurred_area = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
-                        im0[y:y + h, x:x + w] = blurred_area
+                        im0[y:y+h, x:x+w] = blurred_area
                     self.plotted_img = im0
             Anonymize.write_media(self)
 
