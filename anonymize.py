@@ -3,6 +3,7 @@ import re
 import gc
 import cv2
 import torch
+import shutil
 import imageio
 import mimetypes
 import numpy as np
@@ -21,13 +22,8 @@ mimetypes.init()
 
 class Anonymize:
     def __init__(self):
-        # CUDA settings
-        if torch.cuda.is_available():
-            self.device = torch.cuda.device_count()
-            print(f"Using {torch.cuda.get_device_name(torch.cuda.current_device())}.")
-        else:
-            self.device = "cpu"
-            print("Using CPU.")
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
 
         # Path settings
         self.source, self.destination = './media/input_media', './media/output_media'
@@ -56,6 +52,7 @@ class Anonymize:
         # Option settings
         self.blur_ratio = 25
         self.rounded_edges = 5
+        self.progressive_blur = 15
         self.ROI_enlargement = 1.05
         self.conf = 0.25
         self.blur = True
@@ -71,51 +68,48 @@ class Anonymize:
         self.model_name = 'yolov8n-seg.pt' if self.task == 'segment' else "yolov8n.pt"
         if any([classe in self.classes2blur for classe in ['face', 'plate']]):
             self.model_name = "yolov8m_faces&plates_720p.pt"  # "yolov8m_faces&plates_1080p.pt"
-        self.model_path = kwargs['model_path'] if 'model_path' in kwargs \
-            else os.path.join(self.models_dir, self.model_name)
-        print('Model used: ' + str(self.model_path))
+        self.model_path = kwargs.get('model_path', os.path.join(self.models_dir, self.model_name))
+        print(f'Model used: {self.model_path}')
         self.model = YOLO(self.model_path)
-        self.class_list = self.model.model.names.values()
+        self.class_list = list(self.model.model.names.values())
 
     def process(self, **kwargs):
-        if self.model is not None:
-            self.input_path = self.source if self.input_path is None else self.input_path
-            self.input_path = kwargs['media_path'] if 'media_path' in kwargs else self.input_path
-            if os.path.isdir(self.input_path):
-                for media in os.listdir(self.input_path):
-                    self.input_path = os.path.join(self.input_path, media)
-                    self.output_path = os.path.join(self.destination, media[:-4] + '_blurred' + media[-4:])
-                    Anonymize.setup_source(self)
-                    Anonymize.apply_process(self, **kwargs)
-            else:
-                self.output_path = self.input_path[:-4].replace('input', 'output') + '_blurred' + self.input_path[-4:]
-                Anonymize.setup_source(self, **kwargs)
-                Anonymize.apply_process(self, **kwargs)
-        else:
+        if not self.model:
             print('No model is loaded')
+            return
+
+        self.input_path = kwargs.get('media_path', self.input_path or self.source)
+
+        if os.path.isdir(self.input_path):
+            for media in os.listdir(self.input_path):
+                self.input_path = os.path.join(self.input_path, media)
+                self.output_path = os.path.join(self.destination, media[:-4] + '_blurred' + media[-4:])
+                self.setup_source(**kwargs)
+                self.apply_process(**kwargs)
+        else:
+            self.output_path = self.input_path[:-4].replace('input', 'output') + '_blurred' + self.input_path[-4:]
+            self.setup_source(**kwargs)
+            self.apply_process(**kwargs)
 
     def setup_source(self, **kwargs):
-        print('Setting up media: ' + str(self.input_path))
-        with imageio.get_reader(self.input_path) as reader:
-            self.meta_data = reader.get_meta_data()
-            if 'fps' in self.meta_data:
-                file_ext = (kwargs['file_ext'] if 'file_ext' in kwargs else '.mp4')
-                suffix, fourcc = ('.mp4', 'avc1') if MACOS else (file_ext, 'MJPG') if WINDOWS else (file_ext, 'MJPG')
-                # suffix, fourcc = ('.mp4', 'avc1') if MACOS else ('.avi', 'WMV2') if WINDOWS else ('.avi', 'MJPG')
-                save_path = str(Path(self.output_path).with_suffix(suffix))
-                self.vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), self.meta_data['fps'],
-                                                  (self.meta_data['size'][0], self.meta_data['size'][1]))
+        print(f'Setting up media: {self.input_path}')
+        cap = cv2.VideoCapture(self.input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        suffix, fourcc = ('.mp4', 'avc1') if MACOS else ('.mp4', 'mp4v')
+        save_path = str(Path(self.output_path).with_suffix(suffix))
+        self.meta_data = {'fps': fps, 'size': (width, height)}
+        self.vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (width, height))
 
     def apply_process(self, **kwargs):
-        # Apply model
-        self.classes2blur = kwargs['classes2blur'] if 'classes2blur' in kwargs else self.classes2blur
-        classes2blur_by_names = re.findall(r"\'(.*?)\'", str(self.classes2blur))
-        classes2blur_by_index = []
-        for idx, elem in enumerate(self.class_list):
-            if elem in classes2blur_by_names:
-                classes2blur_by_index.append(idx)
+        self.classes2blur = kwargs.get('classes2blur', self.classes2blur)
+        classes2blur_by_index = [i for i, name in enumerate(self.class_list) if name in self.classes2blur]
+
         self.results = self.model.track(
-            source=(kwargs['media_path'] if 'media_path' in kwargs else self.input_path),
+            source=kwargs.get('media_path', self.input_path),
             # stream=True,
             task=self.task,
             mode=self.mode,
@@ -125,74 +119,118 @@ class Anonymize:
             save=self.save,
             save_txt=self.save_txt,
             classes=classes2blur_by_index,
-            conf=(kwargs['detection_threshold'] if 'detection_threshold' in kwargs else self.conf),
-            show=(kwargs['show_preview'] if 'show_preview' in kwargs else self.show),
-            boxes=(kwargs['show_boxes'] if 'show_boxes' in kwargs else self.boxes),
-            show_labels=(kwargs['show_labels'] if 'show_labels' in kwargs else self.show_labels),
-            show_conf=(kwargs['show_conf'] if 'show_conf' in kwargs else self.show_conf)
+            conf=kwargs.get('detection_threshold', self.conf),
+            show=kwargs.get('show_preview', self.show),
+            boxes=kwargs.get('show_boxes', self.boxes),
+            show_labels=kwargs.get('show_labels', self.show_labels),
+            show_conf=kwargs.get('show_conf', self.show_conf)
         )
         # Blur detections
         if self.classes2blur:
-            Anonymize.blur_results(self, **kwargs)
-            if 'fps' in self.meta_data:
+            self.blur_results(**kwargs)
+            if self.vid_writer:
                 self.vid_writer.release()
-            print('Process complete for media: ' + str(self.input_path))
+                self.copy_audio(self.output_path)
+            print(f'Process complete for media: {self.input_path}')
         # if cv2.waitKey(1) & 0xFF == ord('q'):
         #     break
         # cv2.waitKey(0)
         # print(results[0].boxes.data)
 
     def blur_results(self, **kwargs):
+
+        # Paramètres configurables
         plot_args = {'line_width': None, 'boxes': False, 'conf': False, 'labels': False}
-        classes2blur = (kwargs['classes2blur'] if 'classes2blur' in kwargs else self.classes2blur)
-        blur_ratio = int(kwargs['blur_ratio'] if 'blur_ratio' in kwargs else self.blur_ratio)
-        rounded_edges = int(kwargs['rounded_edges'] if 'rounded_edges' in kwargs else self.rounded_edges)
-        roi_enlargement = (kwargs['ROI_enlargement'] if 'ROI_enlargement' in kwargs else self.ROI_enlargement)
-        detection_threshold = (kwargs['detection_threshold'] if 'detection_threshold' in kwargs else self.conf)
+        classes2blur = kwargs.get('classes2blur', self.classes2blur)
+        blur_ratio = int(kwargs.get('blur_ratio', self.blur_ratio))
+        rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))
+        progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Flou sur les contours
+        roi_enlargement = kwargs.get('ROI_enlargement', self.ROI_enlargement)
+        detection_threshold = kwargs.get('detection_threshold', self.conf)
+
         for result in tqdm(self.results, desc='Blurring media', unit='frames', dynamic_ncols=True):  # Loop on images
             im0 = result.plot(**plot_args)
-            if len(classes2blur) and len(result.boxes):
-                for d in result.boxes:  # Loop on boxes
-                    label = result.names[int(d.cls)]
-                    if label in classes2blur and float(d.conf) >= detection_threshold:
-                        x, y = int(d.xyxy[0][0]), int(d.xyxy[0][1])
-                        w, h = int(d.xyxy[0][2]) - x, int(d.xyxy[0][3]) - y
-                        bounds = Bounds(x, y, x+w, y+h).scale(im0.shape, roi_enlargement).expand(im0.shape, rounded_edges)
-                        x, y, w, h = bounds.x_min, bounds.y_min, bounds.x_max - bounds.x_min, bounds.y_max - bounds.y_min
-                        blur_area = im0[y:y + h, x:x + w]
-                        if label == 'face' or label == 'person':
-                            mask = np.zeros((h, w), dtype=np.uint8)
-                            center, axes = (w//2, h//2), (w//2, h//2)
-                            cv2.ellipse(mask, center, axes, 0, 0, 360, (255, 255, 255), thickness=-1)
-                            im0_cropped = cv2.bitwise_and(blur_area, blur_area, mask=cv2.bitwise_not(mask))
-                            blurred_area = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0, dst=mask)
-                            blurred_area = cv2.addWeighted(im0_cropped, 0.5, blurred_area, 0.5, 0)
-                        else:
-                            blurred_area = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
-                        im0[y:y+h, x:x+w] = blurred_area
-                    self.plotted_img = im0
-            Anonymize.write_media(self)
+
+            if not classes2blur or not result.boxes:
+                self.plotted_img = im0
+                self.write_media()
+                continue
+
+            for d in result.boxes:
+                label = result.names[int(d.cls)]
+                if label not in classes2blur or float(d.conf) < detection_threshold:
+                    continue
+
+                x, y = int(d.xyxy[0][0]), int(d.xyxy[0][1])
+                w, h = int(d.xyxy[0][2]) - x, int(d.xyxy[0][3]) - y
+                bounds = Bounds(x, y, x+w, y+h).scale(im0.shape, roi_enlargement).expand(im0.shape, rounded_edges)
+                x, y, w, h = bounds.x_min, bounds.y_min, bounds.x_max - bounds.x_min, bounds.y_max - bounds.y_min
+
+                # Zone à flouter
+                blur_area = im0[y:y + h, x:x + w]
+
+                if label in ['face', 'person']:
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    center, axes = (w//2, h//2), (w//2, h//2)
+                    cv2.ellipse(mask, center, axes, 0, 0, 360, (255, 255, 255), thickness=-1)
+                    blurred = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
+                    masked_blur = cv2.bitwise_and(blurred, blurred, mask=mask)
+                    im0[y:y+h, x:x+w] = cv2.bitwise_and(im0[y:y+h, x:x+w], im0[y:y+h, x:x+w], mask=cv2.bitwise_not(mask)) + masked_blur
+                else:
+                    im0[y:y+h, x:x+w] = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
+
+            self.plotted_img = im0
+            self.write_media()
 
     def write_media(self):
-        im0 = self.plotted_img
-        if 'fps' not in self.meta_data:  # 'image'
-            cv2.imwrite(self.output_path, im0)
-        else:  # 'video' or 'stream'
-            self.vid_writer.write(im0)
-
-    def copy_audio(self):
-        # copy over audio stream from original video to edited video
-        if which("ffmpeg") is not None:
-            ffmpeg_exe = "ffmpeg"
+        if 'fps' not in self.meta_data:
+            cv2.imwrite(self.output_path, self.plotted_img)
         else:
-            ffmpeg_exe = os.getenv("FFMPEG_BINARY")
-            if not ffmpeg_exe:
-                print("FFMPEG could not be found! "
-                      "Please make sure the ffmpeg.exe is available under the environment variable 'FFMPEG_BINARY'.")
-                return
-        if 'audio_codec' in self.meta_data:
-            sp.run([ffmpeg_exe, "-y", "-i", './media/temp', "-i", self.input_path, "-c", "copy",
-                    "-map", "0:0", "-map", "1:1", "-shortest", self.output_path, ], stdout=sp.DEVNULL, )
+            self.vid_writer.write(self.plotted_img)
+
+    def copy_audio(self, temp_video_path):
+        ffmpeg_exe = which("ffmpeg") or os.getenv("FFMPEG_BINARY")
+        if not ffmpeg_exe:
+            print("❌ FFMPEG not found. Skipping audio copy.")
+            return
+
+        # Assurer l'existence du dossier de sortie
+        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+
+        if not os.path.isfile(temp_video_path):
+            print(f"❌ Temp video file not found: {temp_video_path}")
+            return
+
+        if not os.path.isfile(self.input_path):
+            print(f"❌ Original input file not found: {self.input_path}")
+            return
+
+        # Fichier de sortie temporaire
+        final_output = self.output_path
+        temp_output_with_audio = final_output.replace(".mp4", "_with_audio.mp4")
+
+        command = [
+            ffmpeg_exe, "-y",
+            "-i", temp_video_path,  # Vidéo modifiée sans audio
+            "-i", self.input_path,  # Vidéo originale avec audio
+            "-map", "0:v",  # Vidéo de la version floutée
+            "-map", "1:a?",  # Audio de la vidéo originale (optionnel, ? évite l'erreur s'il n'y a pas d'audio)
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-shortest",
+            temp_output_with_audio
+        ]
+
+        result = sp.run(command, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print("❌ Error during audio copy:")
+            print(result.stderr)
+            return
+
+        # Remplacer l'ancienne sortie par celle avec l'audio
+        shutil.move(temp_output_with_audio, final_output)
+        print(f"✅ Audio copied and merged into: {final_output}")
 
 
 def stop_process():
@@ -200,22 +238,10 @@ def stop_process():
     exit()
 
 
-# def free_gpu_cache():
-#     print("Initial GPU Usage")
-#     gpu_usage()
-#     torch.cuda.empty_cache()
-#     cuda.select_device(0)
-#     cuda.close()
-#     cuda.select_device(0)
-#     print("GPU Usage after emptying the cache")
-#     gpu_usage()
-
-
 if __name__ == '__main__':
-    print('CUDA is currently available: ' + str(torch.cuda.is_available()))
+    print('CUDA available:', torch.cuda.is_available())
     torch.cuda.empty_cache()
     gc.collect()
-    # free_gpu_cache()
     model = Anonymize()
-    Anonymize.load_model(model)
-    Anonymize.process(model)
+    model.load_model()
+    model.process()
