@@ -1,10 +1,8 @@
 import os
-import re
 import gc
 import cv2
 import torch
 import shutil
-import imageio
 import mimetypes
 import numpy as np
 import subprocess as sp
@@ -80,16 +78,67 @@ class Anonymize:
 
         self.input_path = kwargs.get('media_path', self.input_path or self.source)
 
+        # Folder
         if os.path.isdir(self.input_path):
             for media in os.listdir(self.input_path):
-                self.input_path = os.path.join(self.input_path, media)
-                self.output_path = os.path.join(self.destination, media[:-4] + '_blurred' + media[-4:])
-                self.setup_source(**kwargs)
-                self.apply_process(**kwargs)
+                media_path = os.path.join(self.input_path, media)
+                self.input_path = media_path
+                self.output_path = os.path.join(
+                    self.destination, media[:-4] + '_blurred' + media[-4:]
+                )
+
+                if self.is_image(media_path):
+                    self.process_image(media_path, self.output_path, **kwargs)
+                else:
+                    self.setup_source(**kwargs)
+                    self.apply_process(**kwargs)
+        # TODO: File list
+        # File
         else:
             self.output_path = self.input_path[:-4].replace('input', 'output') + '_blurred' + self.input_path[-4:]
-            self.setup_source(**kwargs)
-            self.apply_process(**kwargs)
+
+            if self.is_image(self.input_path):
+                self.process_image(self.input_path, self.output_path, **kwargs)
+            else:
+                self.setup_source(**kwargs)
+                self.apply_process(**kwargs)
+
+
+    def process_image(self, input_path, output_path, **kwargs):
+        img = cv2.imread(input_path)
+        if img is None:
+            print(f"Could not load image: {input_path}")
+            return
+
+        self.classes2blur = kwargs.get('classes2blur', self.classes2blur)
+        classes2blur_by_index = [
+            i for i, name in enumerate(self.class_list) if name in self.classes2blur
+        ]
+
+        results = self.model.predict(
+            source=img,
+            task=self.task,
+            device=self.device,
+            retina_masks=self.ret_mask,
+            imgsz=max(img.shape[:2]),
+            conf=kwargs.get('detection_threshold', self.conf),
+            classes=classes2blur_by_index,
+            verbose=False
+        )
+
+        if results:
+            self.plotted_img = results[0].plot(boxes=False, conf=False, labels=False)
+            self.results = results
+            self.blur_results(**kwargs)
+        else:
+            print("No detections found.")
+            cv2.imwrite(output_path, img)
+
+
+    def is_image(self, path):
+        mime_type, _ = mimetypes.guess_type(path)
+        return mime_type and mime_type.startswith("image")
+
 
     def setup_source(self, **kwargs):
         print(f'Setting up media: {self.input_path}')
@@ -142,9 +191,9 @@ class Anonymize:
         # Paramètres configurables
         plot_args = {'line_width': None, 'boxes': False, 'conf': False, 'labels': False}
         classes2blur = kwargs.get('classes2blur', self.classes2blur)
-        blur_ratio = int(kwargs.get('blur_ratio', self.blur_ratio))
-        rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))
-        progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Flou sur les contours
+        blur_ratio = int(kwargs.get('blur_ratio', self.blur_ratio))  # Quantité de flou
+        rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))  # Arrondi des angles
+        progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Flou progressif sur les contours
         roi_enlargement = kwargs.get('ROI_enlargement', self.ROI_enlargement)
         detection_threshold = kwargs.get('detection_threshold', self.conf)
 
@@ -183,7 +232,11 @@ class Anonymize:
             self.write_media()
 
     def write_media(self):
+        if not isinstance(self.meta_data, dict):
+            self.meta_data = {}
+
         if 'fps' not in self.meta_data:
+            self.meta_data['fps'] = 1
             cv2.imwrite(self.output_path, self.plotted_img)
         else:
             self.vid_writer.write(self.plotted_img)
