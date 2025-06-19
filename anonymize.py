@@ -73,7 +73,7 @@ class Anonymize:
 
     def process(self, **kwargs):
         if not self.model:
-            print('No model is loaded')
+            print('❌ No model is loaded')
             return
 
         self.input_path = kwargs.get('media_path', self.input_path or self.source)
@@ -107,7 +107,7 @@ class Anonymize:
     def process_image(self, input_path, output_path, **kwargs):
         img = cv2.imread(input_path)
         if img is None:
-            print(f"Could not load image: {input_path}")
+            print(f"❌ Could not load image: {input_path}")
             return
 
         self.classes2blur = kwargs.get('classes2blur', self.classes2blur)
@@ -180,7 +180,7 @@ class Anonymize:
             if self.vid_writer:
                 self.vid_writer.release()
                 self.copy_audio(self.output_path)
-            print(f'Process complete for media: {self.input_path}')
+            print(f'✅ Process complete for media: {self.input_path}')
         # if cv2.waitKey(1) & 0xFF == ord('q'):
         #     break
         # cv2.waitKey(0)
@@ -188,14 +188,18 @@ class Anonymize:
 
     def blur_results(self, **kwargs):
 
-        # Paramètres configurables
+        # Settings
         plot_args = {'line_width': None, 'boxes': False, 'conf': False, 'labels': False}
         classes2blur = kwargs.get('classes2blur', self.classes2blur)
-        blur_ratio = int(kwargs.get('blur_ratio', self.blur_ratio))  # Quantité de flou
-        rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))  # Arrondi des angles
-        progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Flou progressif sur les contours
-        roi_enlargement = kwargs.get('ROI_enlargement', self.ROI_enlargement)
-        detection_threshold = kwargs.get('detection_threshold', self.conf)
+        blur_ratio = int(kwargs.get('blur_ratio', self.blur_ratio))  # Amount of blur
+        if blur_ratio <= 0:
+            blur_ratio = 1
+        if blur_ratio % 2 == 0:
+            blur_ratio += 1
+        rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))  # Rounding corners
+        progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Progressive contours
+        roi_enlargement = kwargs.get('ROI_enlargement', self.ROI_enlargement)  # Enlarging the blurred area
+        detection_threshold = kwargs.get('detection_threshold', self.conf)  # Object detection threshold
 
         for result in tqdm(self.results, desc='Blurring media', unit='frames', dynamic_ncols=True):  # Loop on images
             im0 = result.plot(**plot_args)
@@ -215,18 +219,31 @@ class Anonymize:
                 bounds = Bounds(x, y, x+w, y+h).scale(im0.shape, roi_enlargement).expand(im0.shape, rounded_edges)
                 x, y, w, h = bounds.x_min, bounds.y_min, bounds.x_max - bounds.x_min, bounds.y_max - bounds.y_min
 
-                # Zone à flouter
+                # Area to be blurred
                 blur_area = im0[y:y + h, x:x + w]
 
-                if label in ['face', 'person']:
+                if label in ['face', 'person'] and progressive_blur > 0:
+                    # Progressive mask (blurred gradient at center)
                     mask = np.zeros((h, w), dtype=np.uint8)
-                    center, axes = (w//2, h//2), (w//2, h//2)
-                    cv2.ellipse(mask, center, axes, 0, 0, 360, (255, 255, 255), thickness=-1)
+                    center, axes = (w // 2, h // 2), (w // 2, h // 2)
+                    cv2.ellipse(mask, center, axes, 0, 0, 360, 255, -1)
+
+                    # Apply an additional blur to the mask to make it progressive
+                    blur_strength = max(1, progressive_blur)
+                    if blur_strength % 2 == 0:
+                        blur_strength += 1
+                    smooth_mask = cv2.GaussianBlur(mask, (blur_strength, blur_strength), 0)
+
+                    # Convert smoothed mask into 3 channels
+                    smooth_mask_3ch = cv2.merge([smooth_mask] * 3)
+
+                    # Blur the image in the relevant area
                     blurred = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
-                    masked_blur = cv2.bitwise_and(blurred, blurred, mask=mask)
-                    im0[y:y+h, x:x+w] = cv2.bitwise_and(im0[y:y+h, x:x+w], im0[y:y+h, x:x+w], mask=cv2.bitwise_not(mask)) + masked_blur
-                else:
-                    im0[y:y+h, x:x+w] = cv2.GaussianBlur(blur_area, (blur_ratio, blur_ratio), 0)
+
+                    # Apply the progressive mask
+                    blended = (blurred * (smooth_mask_3ch / 255.0) + blur_area * (1 - smooth_mask_3ch / 255.0)).astype(
+                        np.uint8)
+                    im0[y:y + h, x:x + w] = blended
 
             self.plotted_img = im0
             self.write_media()
@@ -247,7 +264,7 @@ class Anonymize:
             print("❌ FFMPEG not found. Skipping audio copy.")
             return
 
-        # Assurer l'existence du dossier de sortie
+        # Ensure the existence of a discharge file
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
 
         if not os.path.isfile(temp_video_path):
@@ -258,16 +275,16 @@ class Anonymize:
             print(f"❌ Original input file not found: {self.input_path}")
             return
 
-        # Fichier de sortie temporaire
+        # Temporary output file
         final_output = self.output_path
         temp_output_with_audio = final_output.replace(".mp4", "_with_audio.mp4")
 
         command = [
             ffmpeg_exe, "-y",
-            "-i", temp_video_path,  # Vidéo modifiée sans audio
-            "-i", self.input_path,  # Vidéo originale avec audio
-            "-map", "0:v",  # Vidéo de la version floutée
-            "-map", "1:a?",  # Audio de la vidéo originale (optionnel, ? évite l'erreur s'il n'y a pas d'audio)
+            "-i", temp_video_path,  # Edited video without audio
+            "-i", self.input_path,  # Original video with audio
+            "-map", "0:v",  # Video of the blurred version
+            "-map", "1:a?",  # Audio of original video (optional, ? avoids error if there is no audio)
             "-c:v", "copy",
             "-c:a", "copy",
             "-shortest",
@@ -281,7 +298,7 @@ class Anonymize:
             print(result.stderr)
             return
 
-        # Remplacer l'ancienne sortie par celle avec l'audio
+        # Replace old output with audio output
         shutil.move(temp_output_with_audio, final_output)
         print(f"✅ Audio copied and merged into: {final_output}")
 
