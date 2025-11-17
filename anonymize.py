@@ -6,10 +6,12 @@ import shutil
 import mimetypes
 import numpy as np
 import subprocess as sp
+import platform
+import re
 
 from tqdm import tqdm
-from shutil import which
 from pathlib import Path
+from platform import system
 
 from .bounds import Bounds
 from ultralytics import YOLO, settings
@@ -259,7 +261,7 @@ class Anonymize:
             self.vid_writer.write(self.plotted_img)
 
     def copy_audio(self, temp_video_path):
-        ffmpeg_exe = which("ffmpeg") or os.getenv("FFMPEG_BINARY")
+        ffmpeg_exe = get_ffmpeg_path()
         if not ffmpeg_exe:
             print("❌ FFMPEG not found. Skipping audio copy.")
             return
@@ -281,14 +283,14 @@ class Anonymize:
 
         command = [
             ffmpeg_exe, "-y",
-            "-i", temp_video_path,  # Edited video without audio
-            "-i", self.input_path,  # Original video with audio
+            "-i", adapt_path_for_ffmpeg(temp_video_path, ffmpeg_exe),  # Edited video without audio
+            "-i", adapt_path_for_ffmpeg(self.input_path, ffmpeg_exe),  # Original video with audio
             "-map", "0:v",  # Video of the blurred version
             "-map", "1:a?",  # Audio of original video (optional, ? avoids error if there is no audio)
             "-c:v", "copy",
             "-c:a", "copy",
             "-shortest",
-            temp_output_with_audio
+            adapt_path_for_ffmpeg(temp_output_with_audio, ffmpeg_exe)
         ]
 
         result = sp.run(command, capture_output=True, text=True)
@@ -301,6 +303,74 @@ class Anonymize:
         # Replace old output with audio output
         shutil.move(temp_output_with_audio, final_output)
         print(f"✅ Audio copied and merged into: {final_output}")
+
+
+
+def is_wsl():
+    try:
+        return 'microsoft' in platform.release().lower() or 'WSL_DISTRO_NAME' in os.environ
+    except Exception:
+        return False
+
+
+def get_ffmpeg_path():
+    env_binary = os.getenv("FFMPEG_BINARY")
+    if env_binary and os.path.isfile(env_binary):
+        print(f"✅ Using ffmpeg from FFMPEG_BINARY: {env_binary}")
+        return env_binary
+
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if ffmpeg_exe:
+        return ffmpeg_exe
+
+    windows_candidates = [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+    ]
+    wsl_candidates = [
+        "/mnt/c/ffmpeg/bin/ffmpeg.exe",
+        "/mnt/c/Program Files/ffmpeg/bin/ffmpeg.exe",
+        "/mnt/c/Program Files (x86)/ffmpeg/bin/ffmpeg.exe",
+    ]
+    linux_candidates = [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+    ]
+
+    if system() == "Windows":
+        for candidate in windows_candidates:
+            if os.path.isfile(candidate):
+                print(f"✅ Using ffmpeg for Windows: {candidate}")
+                return candidate
+
+    if is_wsl():
+        for candidate in wsl_candidates:
+            if os.path.isfile(candidate):
+                print(f"✅ Using Windows ffmpeg via WSL: {candidate}")
+                return candidate
+
+    for candidate in linux_candidates:
+        if os.path.isfile(candidate):
+            print(f"✅ Using ffmpeg for Linux: {candidate}")
+            return candidate
+
+    print("❌ FFMPEG binary not found. Please install ffmpeg or set FFMPEG_BINARY.")
+    return None
+
+
+def adapt_path_for_ffmpeg(path, ffmpeg_exe):
+    if not path or not ffmpeg_exe:
+        return path
+
+    # Windows executables can't consume /mnt/* paths, convert if needed
+    if ffmpeg_exe.lower().endswith(".exe"):
+        match = re.match(r"^/mnt/([a-zA-Z])/(.*)", path)
+        if match:
+            drive = match.group(1).upper()
+            rest = match.group(2).replace('/', '\\')
+            return f"{drive}:\\{rest}"
+    return path
 
 
 def stop_process():
