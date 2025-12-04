@@ -26,7 +26,7 @@ class Anonymize:
         print(f"Using device: {self.device}")
 
         # Path settings
-        self.source, self.destination = './media/input_media', './media/output_media'
+        self.source, self.destination = './media/anonymizer/inputs', './media/anonymizer/outputs'
         os.makedirs(self.source, exist_ok=True), os.makedirs(self.destination, exist_ok=True)
         self.input_path, self.output_path = None, None
         self.save_path, self.models_dir = './runs', './models'
