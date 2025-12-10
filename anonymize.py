@@ -7,7 +7,6 @@ import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 
-from .bounds import Bounds
 from .blur_utils import blur_detection, blur_segmentation, normalize_blur_ratio
 from .media_utils import is_image
 from .ffmpeg_utils import copy_audio_to_video
