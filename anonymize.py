@@ -3,6 +3,7 @@ import gc
 import cv2
 import torch
 import numpy as np
+import sys
 
 from tqdm import tqdm
 from pathlib import Path
@@ -13,14 +14,18 @@ from .ffmpeg_utils import copy_audio_to_video
 from ultralytics import YOLO, settings
 from ultralytics.utils import MACOS, WINDOWS
 
+# Add wama to path for settings import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from wama.settings import MEDIA_INPUT_ROOT, MEDIA_OUTPUT_ROOT
+
 
 class Anonymize:
     def __init__(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
 
-        # Path settings
-        self.source, self.destination = './media/anonymizer/inputs', './media/anonymizer/outputs'
+        # Path settings - use paths from Django settings
+        self.source, self.destination = str(MEDIA_INPUT_ROOT), str(MEDIA_OUTPUT_ROOT)
         os.makedirs(self.source, exist_ok=True), os.makedirs(self.destination, exist_ok=True)
         self.input_path, self.output_path = None, None
         self.save_path, self.models_dir = './runs', './models'
