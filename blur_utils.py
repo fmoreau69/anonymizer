@@ -8,17 +8,21 @@ def apply_mask_blur(im0, mask, blur_ratio, progressive_blur=0):
     Apply blur using a segmentation mask.
 
     Args:
-        im0: Input image (numpy array)
-        mask: Binary segmentation mask (numpy array, same size as im0)
+        im0: Input image (numpy array BGR)
+        mask: Binary segmentation mask (numpy array, same size as im0, values 0-255)
         blur_ratio: Blur kernel size (must be odd)
         progressive_blur: Progressive blur strength for smooth edges (0 to disable)
 
     Returns:
         Modified image with mask-based blur applied
     """
-    # Ensure mask is binary
+    # Ensure mask is uint8
     if mask.dtype != np.uint8:
         mask = mask.astype(np.uint8)
+
+    # Ensure mask is 2D
+    if len(mask.shape) > 2:
+        mask = mask[:, :, 0]
 
     # Normalize blur ratio
     blur_ratio = normalize_blur_ratio(blur_ratio)
@@ -28,23 +32,29 @@ def apply_mask_blur(im0, mask, blur_ratio, progressive_blur=0):
 
     # Apply progressive blur to mask edges if requested
     if progressive_blur > 0:
-        blur_strength = max(1, int(progressive_blur))
+        blur_strength = max(3, int(progressive_blur))
         if blur_strength % 2 == 0:
             blur_strength += 1
-        # Smooth the mask edges
+        # Smooth the mask edges for gradual transition
         smooth_mask = cv2.GaussianBlur(mask, (blur_strength, blur_strength), 0)
     else:
         smooth_mask = mask
 
-    # Convert mask to 3 channels if needed
-    if len(smooth_mask.shape) == 2:
-        smooth_mask_3ch = cv2.merge([smooth_mask] * 3)
-    else:
-        smooth_mask_3ch = smooth_mask
+    # Normalize mask to float [0, 1]
+    alpha = smooth_mask.astype(np.float32) / 255.0
 
-    # Blend original and blurred images using the mask
-    smooth_mask_3ch = smooth_mask_3ch.astype(np.float32) / 255.0
-    result = (blurred * smooth_mask_3ch + im0 * (1 - smooth_mask_3ch)).astype(np.uint8)
+    # Expand alpha to 3 channels for proper blending
+    alpha_3ch = np.dstack([alpha, alpha, alpha])
+
+    # Convert images to float for proper blending
+    im0_float = im0.astype(np.float32)
+    blurred_float = blurred.astype(np.float32)
+
+    # Blend: where mask is 1 (white) use blurred, where 0 (black) use original
+    result = (blurred_float * alpha_3ch + im0_float * (1.0 - alpha_3ch))
+
+    # Clip values to valid range and convert back to uint8
+    result = np.clip(result, 0, 255).astype(np.uint8)
 
     return result
 
@@ -54,8 +64,8 @@ def blur_segmentation(im0, segmentation_mask, blur_ratio, progressive_blur=0):
     Apply blur to a segmented region.
 
     Args:
-        im0: Input image (numpy array)
-        segmentation_mask: Segmentation mask from YOLO (H x W, values 0-255)
+        im0: Input image (numpy array BGR)
+        segmentation_mask: Segmentation mask from YOLO (H x W, values 0-255 or 0-1)
         blur_ratio: Blur kernel size
         progressive_blur: Progressive blur strength for smooth edges
 
@@ -65,10 +75,24 @@ def blur_segmentation(im0, segmentation_mask, blur_ratio, progressive_blur=0):
     if segmentation_mask is None or segmentation_mask.size == 0:
         return im0
 
+    # Handle multi-dimensional masks (take first channel if needed)
+    if len(segmentation_mask.shape) > 2:
+        segmentation_mask = segmentation_mask[:, :, 0]
+
+    # Normalize mask to 0-255 range
+    if segmentation_mask.max() <= 1.0:
+        segmentation_mask = (segmentation_mask * 255).astype(np.uint8)
+    else:
+        segmentation_mask = segmentation_mask.astype(np.uint8)
+
     # Ensure mask is the same size as the image
+    # Use INTER_NEAREST to preserve binary mask edges (no interpolation artifacts)
     if segmentation_mask.shape[:2] != im0.shape[:2]:
-        segmentation_mask = cv2.resize(segmentation_mask, (im0.shape[1], im0.shape[0]),
-                                       interpolation=cv2.INTER_LINEAR)
+        segmentation_mask = cv2.resize(
+            segmentation_mask,
+            (im0.shape[1], im0.shape[0]),
+            interpolation=cv2.INTER_NEAREST
+        )
 
     return apply_mask_blur(im0, segmentation_mask, blur_ratio, progressive_blur)
 

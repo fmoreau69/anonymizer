@@ -77,8 +77,12 @@ class Anonymize:
         self.model = YOLO(self.model_path)
         self.class_list = list(self.model.model.names.values())
 
-        # Detect if model supports segmentation
+        # Detect if model supports segmentation and update task accordingly
         self._is_segmentation_model = self._detect_segmentation_model()
+        if self._is_segmentation_model:
+            self.task = 'segment'
+            self.ret_mask = True  # Enable retina masks for better quality
+            print(f'[Segmentation] Model detected as segmentation model, task set to: {self.task}')
 
     def _detect_segmentation_model(self):
         """
@@ -143,9 +147,25 @@ class Anonymize:
             return
 
         self.classes2blur = kwargs.get('classes2blur', self.classes2blur)
+
+        # Normalize classes to lowercase for case-insensitive matching
+        classes2blur_lower = [c.lower() for c in self.classes2blur]
         classes2blur_by_index = [
-            i for i, name in enumerate(self.class_list) if name in self.classes2blur
+            i for i, name in enumerate(self.class_list) if name.lower() in classes2blur_lower
         ]
+
+        # Debug: Show which classes will be detected
+        matched_classes = [name for name in self.class_list if name.lower() in classes2blur_lower]
+        unmatched_classes = [c for c in self.classes2blur if c.lower() not in [n.lower() for n in self.class_list]]
+
+        print(f'[Detection] Classes requested: {self.classes2blur}')
+        print(f'[Detection] Classes found in model: {matched_classes}')
+        if unmatched_classes:
+            print(f'[Detection] WARNING: Classes not in model (will be ignored): {unmatched_classes}')
+            print(f'[Detection] Available model classes: {self.class_list[:20]}...')
+
+        if not classes2blur_by_index:
+            print(f'[Detection] ERROR: No matching classes found! Blurring will not work.')
 
         results = self.model.predict(
             source=img,
@@ -206,7 +226,23 @@ class Anonymize:
 
     def apply_process(self, **kwargs):
         self.classes2blur = kwargs.get('classes2blur', self.classes2blur)
-        classes2blur_by_index = [i for i, name in enumerate(self.class_list) if name in self.classes2blur]
+
+        # Normalize classes to lowercase for case-insensitive matching
+        classes2blur_lower = [c.lower() for c in self.classes2blur]
+        classes2blur_by_index = [i for i, name in enumerate(self.class_list) if name.lower() in classes2blur_lower]
+
+        # Debug: Show which classes will be detected
+        matched_classes = [name for name in self.class_list if name.lower() in classes2blur_lower]
+        unmatched_classes = [c for c in self.classes2blur if c.lower() not in [n.lower() for n in self.class_list]]
+
+        print(f'[Detection] Classes requested: {self.classes2blur}')
+        print(f'[Detection] Classes found in model: {matched_classes}')
+        if unmatched_classes:
+            print(f'[Detection] WARNING: Classes not in model (will be ignored): {unmatched_classes}')
+            print(f'[Detection] Available model classes: {self.class_list[:20]}...')  # Show first 20
+
+        if not classes2blur_by_index:
+            print(f'[Detection] ERROR: No matching classes found! Blurring will not work.')
 
         self.results = self.model.track(
             source=kwargs.get('media_path', self.input_path),
@@ -390,11 +426,12 @@ class Anonymize:
                 frame_idx += 1
                 continue
 
-            # Process detections in this frame
+            # Process detections in this frame (classes2blur is already lowercase)
             if use_segmentation and hasattr(result, 'masks') and result.masks is not None:
                 for i, d in enumerate(result.boxes):
                     label = result.names[int(d.cls)]
-                    if label not in classes2blur or float(d.conf) < detection_threshold:
+                    # Case-insensitive comparison
+                    if label.lower() not in classes2blur or float(d.conf) < detection_threshold:
                         continue
 
                     track_id = int(d.id) if hasattr(d, 'id') and d.id is not None else f"det_{i}"
@@ -412,7 +449,8 @@ class Anonymize:
             else:
                 for i, d in enumerate(result.boxes):
                     label = result.names[int(d.cls)]
-                    if label not in classes2blur or float(d.conf) < detection_threshold:
+                    # Case-insensitive comparison
+                    if label.lower() not in classes2blur or float(d.conf) < detection_threshold:
                         continue
 
                     track_id = int(d.id) if hasattr(d, 'id') and d.id is not None else f"det_{i}"
@@ -478,6 +516,8 @@ class Anonymize:
         # Settings
         plot_args = {'line_width': None, 'boxes': False, 'conf': False, 'labels': False}
         classes2blur = kwargs.get('classes2blur', self.classes2blur)
+        # Normalize to lowercase for case-insensitive matching
+        classes2blur_lower = [c.lower() for c in classes2blur]
         blur_ratio = normalize_blur_ratio(kwargs.get('blur_ratio', self.blur_ratio))
         rounded_edges = int(kwargs.get('rounded_edges', self.rounded_edges))  # Rounding corners
         progressive_blur = int(kwargs.get('progressive_blur', self.progressive_blur))  # Progressive contours
@@ -502,8 +542,8 @@ class Anonymize:
         # TWO-PASS APPROACH for interpolation
         interpolated_detections = {}
         if interpolate_detections:
-            # PASS 1: Collect all detections
-            detection_buffer = self.collect_all_detections(classes2blur, detection_threshold, use_segmentation)
+            # PASS 1: Collect all detections (use lowercase for matching)
+            detection_buffer = self.collect_all_detections(classes2blur_lower, detection_threshold, use_segmentation)
 
             # PASS 2: Fill gaps with interpolation
             interpolated_detections = self.fill_detection_gaps(detection_buffer, max_gap)
@@ -513,14 +553,20 @@ class Anonymize:
         # MAIN BLURRING LOOP
         frame_idx = 0
         for result in tqdm(self.results, desc='Blurring media', unit='frames', dynamic_ncols=True):  # Loop on images
-            im0 = result.plot(**plot_args)
+            # Use original image for segmentation (avoid YOLO's colored mask overlay)
+            # Use plot() only for detection models where we might want boxes/labels
+            if use_segmentation:
+                im0 = result.orig_img.copy()
+            else:
+                im0 = result.plot(**plot_args)
 
             if classes2blur and result.boxes:
                 # Use segmentation masks if available
                 if use_segmentation and hasattr(result, 'masks') and result.masks is not None:
                     for i, d in enumerate(result.boxes):
                         label = result.names[int(d.cls)]
-                        if label not in classes2blur or float(d.conf) < detection_threshold:
+                        # Case-insensitive comparison
+                        if label.lower() not in classes2blur_lower or float(d.conf) < detection_threshold:
                             continue
 
                         # Get segmentation mask for this detection
@@ -535,7 +581,8 @@ class Anonymize:
                     # Use bounding box-based blur (original method)
                     for d in result.boxes:
                         label = result.names[int(d.cls)]
-                        if label not in classes2blur or float(d.conf) < detection_threshold:
+                        # Case-insensitive comparison
+                        if label.lower() not in classes2blur_lower or float(d.conf) < detection_threshold:
                             continue
 
                         # Blur this detection using the utility function
