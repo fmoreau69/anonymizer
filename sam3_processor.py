@@ -96,7 +96,8 @@ class SAM3Processor:
 
         try:
             # Import SAM3 modules
-            from sam3.model_builder import build_sam3_image_model, build_sam3_video_predictor
+            # Note: We only import the image model as video predictor requires 'triton' (Linux only)
+            from sam3.model_builder import build_sam3_image_model
             from sam3.model.sam3_image_processor import Sam3Processor as Sam3ImageProcessor
 
             if model_type in ['image', 'auto']:
@@ -107,12 +108,15 @@ class SAM3Processor:
                 logger.info("[SAM3] Image model loaded successfully")
                 print("[SAM3] Image model loaded successfully")
 
-            if model_type in ['video', 'auto']:
-                logger.info("[SAM3] Loading video predictor...")
-                print("[SAM3] Loading video predictor...")
-                self.video_predictor = build_sam3_video_predictor()
-                logger.info("[SAM3] Video predictor loaded successfully")
-                print("[SAM3] Video predictor loaded successfully")
+            # Note: Video predictor requires 'triton' which is not available on Windows.
+            # We use the image processor for frame-by-frame video processing instead.
+            if model_type == 'video':
+                logger.warning("[SAM3] Video predictor not available on Windows (requires triton)")
+                logger.warning("[SAM3] Using image processor for frame-by-frame video processing")
+                print("[SAM3] Video predictor not available, using image processor for videos")
+                # Ensure image model is loaded for video processing
+                if self.image_model is None:
+                    self.load_model('image')
 
             self._model_loaded = True
 
@@ -131,9 +135,12 @@ class SAM3Processor:
             self.load_model('image')
 
     def _ensure_video_model(self):
-        """Load video model if not already loaded."""
-        if self.video_predictor is None:
-            self.load_model('video')
+        """Load model for video processing.
+        Since video predictor requires triton (not available on Windows),
+        we use the image model for frame-by-frame processing.
+        """
+        if self.image_model is None or self.image_processor is None:
+            self.load_model('image')
 
     def process(self, **kwargs):
         """
@@ -244,7 +251,10 @@ class SAM3Processor:
 
     def process_video(self, **kwargs):
         """
-        Process a video using SAM3 video predictor with temporal consistency.
+        Process a video using SAM3 image processor frame-by-frame.
+
+        Since SAM3's video predictor requires 'triton' which is not available on Windows,
+        we process each frame independently using the image processor with text prompts.
 
         Args:
             **kwargs: Processing parameters
@@ -252,40 +262,23 @@ class SAM3Processor:
         logger.info(f"[SAM3] Processing video: {self.input_path}")
         print(f"[SAM3] Processing video: {self.input_path}")
 
+        # Ensure image model is loaded (we use it for frame-by-frame processing)
+        self._ensure_image_model()
+
         # Get output path
         self.output_path = kwargs.get('output_path', self._get_output_path(self.input_path))
 
         # Progress callback
         progress_callback = kwargs.get('progress_callback', None)
 
-        session_id = None
         cap = None
 
         try:
-            # Start video session
-            response = self.video_predictor.handle_request({
-                'type': 'start_session',
-                'resource_path': self.input_path
-            })
-
-            session_id = response.get('session_id')
-            if not session_id:
-                raise RuntimeError(f"Failed to start SAM3 video session: {response}")
-
-            logger.info(f"[SAM3] Video session started: {session_id}")
-
-            # Add prompt at frame 0 to initialize tracking
-            response = self.video_predictor.handle_request({
-                'type': 'add_prompt',
-                'session_id': session_id,
-                'frame_index': 0,
-                'text': self.text_prompt
-            })
-
-            logger.info(f"[SAM3] Prompt added, initializing video processing...")
-
             # Get video properties
             cap = cv2.VideoCapture(self.input_path)
+            if not cap.isOpened():
+                raise RuntimeError(f"Could not open video: {self.input_path}")
+
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -298,38 +291,61 @@ class SAM3Processor:
 
             logger.info(f"[SAM3] Video: {width}x{height}, {fps}fps, {total_frames} frames")
             print(f"[SAM3] Video: {width}x{height}, {fps}fps, {total_frames} frames")
+            logger.info(f"[SAM3] Using frame-by-frame processing with prompt: {self.text_prompt}")
+            print(f"[SAM3] Using frame-by-frame processing with prompt: {self.text_prompt}")
 
-            # Process each frame
+            # Process each frame using image processor
             for frame_idx in tqdm(range(total_frames), desc='[SAM3] Processing video'):
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                # Get mask for this frame from SAM3
-                response = self.video_predictor.handle_request({
-                    'type': 'get_frame_mask',
-                    'session_id': session_id,
-                    'frame_index': frame_idx
-                })
+                # Convert BGR (OpenCV) to RGB (PIL)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_frame = Image.fromarray(frame_rgb)
 
-                masks = response.get('masks', [])
+                try:
+                    # Set image in processor
+                    inference_state = self.image_processor.set_image(pil_frame)
 
-                # Apply blur to detected regions
-                blurred_frame = frame.copy()
-                for mask in masks:
-                    mask_np = self._convert_mask_to_numpy(mask, frame.shape[:2])
-                    blurred_frame = blur_segmentation(
-                        blurred_frame, mask_np,
-                        self.blur_ratio,
-                        self.progressive_blur
+                    # Get segmentation from text prompt
+                    output = self.image_processor.set_text_prompt(
+                        state=inference_state,
+                        prompt=self.text_prompt
                     )
 
-                self.vid_writer.write(blurred_frame)
+                    masks = output.get("masks", [])
+                    scores = output.get("scores", [])
+
+                    # Apply blur to detected regions
+                    blurred_frame = frame.copy()
+                    for i, mask in enumerate(masks):
+                        score = scores[i] if i < len(scores) else 1.0
+                        if score >= self.confidence_threshold:
+                            mask_np = self._convert_mask_to_numpy(mask, frame.shape[:2])
+                            blurred_frame = blur_segmentation(
+                                blurred_frame, mask_np,
+                                self.blur_ratio,
+                                self.progressive_blur
+                            )
+
+                    self.vid_writer.write(blurred_frame)
+
+                except Exception as frame_error:
+                    # If frame processing fails, write original frame
+                    logger.warning(f"[SAM3] Frame {frame_idx} error: {frame_error}, using original")
+                    self.vid_writer.write(frame)
 
                 # Report progress
                 if progress_callback:
                     progress = int((frame_idx + 1) / total_frames * 100)
                     progress_callback(progress)
+
+                # Periodic memory cleanup (every 100 frames)
+                if frame_idx % 100 == 0 and frame_idx > 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             cap.release()
             self.vid_writer.release()
@@ -352,16 +368,6 @@ class SAM3Processor:
             logger.error(f"[SAM3] Error processing video: {e}")
             raise
         finally:
-            # End session
-            if session_id:
-                try:
-                    self.video_predictor.handle_request({
-                        'type': 'end_session',
-                        'session_id': session_id
-                    })
-                except Exception as e:
-                    logger.warning(f"[SAM3] Error ending session: {e}")
-
             # Release resources
             if cap is not None:
                 cap.release()
