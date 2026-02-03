@@ -25,9 +25,51 @@ from .ffmpeg_utils import copy_audio_to_video
 
 # Add wama to path for settings import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from wama.settings import MEDIA_INPUT_ROOT, MEDIA_OUTPUT_ROOT
+from wama.settings import MEDIA_INPUT_ROOT, MEDIA_OUTPUT_ROOT, MODEL_PATHS, AI_MODELS_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def setup_sam3_hf_environment():
+    """
+    Setup HuggingFace environment variables for SAM3 model loading.
+    Reads the token from the SAM3 models directory and configures HF cache.
+    """
+    # Get SAM3 directory from centralized config
+    sam3_dir = MODEL_PATHS.get('vision', {}).get('sam')
+    if sam3_dir:
+        sam3_dir = Path(sam3_dir) / 'sam3'
+    else:
+        sam3_dir = AI_MODELS_DIR / 'models' / 'vision' / 'sam' / 'sam3'
+
+    # Check for token file in SAM3 directory
+    token_file = sam3_dir / 'token'
+    if token_file.exists():
+        try:
+            token = token_file.read_text().strip()
+            if token:
+                # Set HuggingFace token environment variable
+                os.environ['HF_TOKEN'] = token
+                os.environ['HUGGING_FACE_HUB_TOKEN'] = token
+                logger.info(f"[SAM3] HuggingFace token loaded from {token_file}")
+
+                # Also try to save it to the standard location for huggingface_hub
+                try:
+                    from huggingface_hub import HfFolder
+                    HfFolder.save_token(token)
+                    logger.debug("[SAM3] Token saved to HuggingFace standard location")
+                except Exception as e:
+                    logger.debug(f"[SAM3] Could not save token to standard location: {e}")
+
+        except Exception as e:
+            logger.warning(f"[SAM3] Could not read token from {token_file}: {e}")
+
+    # Set HuggingFace cache to SAM3 directory
+    if sam3_dir.exists():
+        # Configure HF to use SAM3 directory as cache
+        os.environ['HF_HOME'] = str(sam3_dir.parent)
+        os.environ['HF_HUB_CACHE'] = str(sam3_dir.parent)
+        logger.info(f"[SAM3] HuggingFace cache set to: {sam3_dir.parent}")
 
 
 class SAM3Processor:
@@ -37,8 +79,12 @@ class SAM3Processor:
     This class provides similar functionality to the YOLO-based Anonymize class,
     but uses SAM3 (Segment Anything Model 3) for text prompt-based segmentation.
 
+    Args:
+        source_dir: Custom input directory (defaults to MEDIA_INPUT_ROOT)
+        destination_dir: Custom output directory (defaults to MEDIA_OUTPUT_ROOT)
+
     Usage:
-        processor = SAM3Processor()
+        processor = SAM3Processor(source_dir='/path/to/input', destination_dir='/path/to/output')
         processor.process(
             media_path='/path/to/video.mp4',
             sam3_prompt='blur all faces and license plates',
@@ -47,14 +93,14 @@ class SAM3Processor:
         )
     """
 
-    def __init__(self):
+    def __init__(self, source_dir=None, destination_dir=None):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"[SAM3] Using device: {self.device}")
         print(f"[SAM3] Using device: {self.device}")
 
-        # Path settings - use same paths as YOLO processor
-        self.source = str(MEDIA_INPUT_ROOT)
-        self.destination = str(MEDIA_OUTPUT_ROOT)
+        # Path settings - use custom paths or fall back to Django settings
+        self.source = str(source_dir) if source_dir else str(MEDIA_INPUT_ROOT)
+        self.destination = str(destination_dir) if destination_dir else str(MEDIA_OUTPUT_ROOT)
         os.makedirs(self.source, exist_ok=True)
         os.makedirs(self.destination, exist_ok=True)
 
@@ -93,6 +139,9 @@ class SAM3Processor:
         if self._model_loaded:
             logger.info("[SAM3] Model already loaded")
             return
+
+        # Setup HuggingFace environment BEFORE importing SAM3 modules
+        setup_sam3_hf_environment()
 
         try:
             # Import SAM3 modules
@@ -444,11 +493,11 @@ class SAM3Processor:
             input_path: Path to input file
 
         Returns:
-            Output path in destination directory
+            Output path in destination directory with model suffix
         """
         filename = os.path.basename(input_path)
         name, ext = os.path.splitext(filename)
-        return os.path.join(self.destination, f"{name}_blurred{ext}")
+        return os.path.join(self.destination, f"{name}_blurred_sam3{ext}")
 
     def cleanup(self):
         """Release all resources and models."""

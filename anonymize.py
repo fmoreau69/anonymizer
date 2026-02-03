@@ -108,6 +108,34 @@ class Anonymize:
 
         return False
 
+    def _get_model_suffix(self):
+        """
+        Get a short model identifier for output filename.
+
+        Returns:
+            str: Model suffix (e.g., 'yolov8m', 'yolov8n-seg')
+        """
+        if not self.model_name:
+            return 'yolo'
+
+        # Extract model name without extension
+        name = os.path.splitext(self.model_name)[0]
+
+        # Simplify common patterns
+        if 'faces&plates' in name.lower():
+            # e.g., "yolov8m_faces&plates_720p" -> "yolov8m-fp"
+            if 'yolov8m' in name.lower():
+                return 'yolov8m-fp'
+            elif 'yolov8l' in name.lower():
+                return 'yolov8l-fp'
+            elif 'yolov8x' in name.lower():
+                return 'yolov8x-fp'
+            return 'yolo-fp'
+
+        # For standard YOLO models, keep it simple
+        # e.g., "yolov8n-seg" -> "yolov8n-seg", "yolov8m" -> "yolov8m"
+        return name.lower()
+
     def process(self, **kwargs):
         if not self.model:
             print('❌ No model is loaded')
@@ -115,13 +143,17 @@ class Anonymize:
 
         self.input_path = kwargs.get('media_path', self.input_path or self.source)
 
+        # Get model suffix for output filename
+        model_suffix = self._get_model_suffix()
+
         # Folder
         if os.path.isdir(self.input_path):
             for media in os.listdir(self.input_path):
                 media_path = os.path.join(self.input_path, media)
                 self.input_path = media_path
+                name, ext = os.path.splitext(media)
                 self.output_path = os.path.join(
-                    self.destination, media[:-4] + '_blurred' + media[-4:]
+                    self.destination, f"{name}_blurred_{model_suffix}{ext}"
                 )
 
                 if is_image(media_path):
@@ -132,7 +164,8 @@ class Anonymize:
         # TODO: File list
         # File
         else:
-            self.output_path = self.input_path[:-4].replace('input', 'output') + '_blurred' + self.input_path[-4:]
+            name, ext = os.path.splitext(os.path.basename(self.input_path))
+            self.output_path = os.path.join(self.destination, f"{name}_blurred_{model_suffix}{ext}")
 
             if is_image(self.input_path):
                 self.process_image(self.input_path, self.output_path, **kwargs)
