@@ -74,6 +74,9 @@ class Anonymize:
         if any([classe in self.classes2blur for classe in ['face', 'plate']]):
             self.model_name = "yolov8m_faces&plates_720p.pt"  # "yolov8m_faces&plates_1080p.pt"
         self.model_path = kwargs.get('model_path', os.path.join(self.models_dir, self.model_name))
+        # Update model_name from actual model_path so output filename reflects the real model
+        if 'model_path' in kwargs:
+            self.model_name = os.path.basename(self.model_path)
         print(f'Model used: {self.model_path}')
         self.model = YOLO(self.model_path)
         self.class_list = list(self.model.model.names.values())

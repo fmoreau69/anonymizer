@@ -43,6 +43,12 @@ def apply_mask_blur(im0, mask, blur_ratio, progressive_blur=0):
     # Normalize mask to float [0, 1]
     alpha = smooth_mask.astype(np.float32) / 255.0
 
+    # Debug: Check alpha values
+    alpha_max = alpha.max()
+    alpha_mean = alpha[alpha > 0].mean() if np.any(alpha > 0) else 0
+    if alpha_max < 0.5:
+        print(f"[apply_mask_blur] Warning: alpha values are low - max={alpha_max:.3f}, mean={alpha_mean:.3f}")
+
     # Expand alpha to 3 channels for proper blending
     alpha_3ch = np.dstack([alpha, alpha, alpha])
 
@@ -55,6 +61,15 @@ def apply_mask_blur(im0, mask, blur_ratio, progressive_blur=0):
 
     # Clip values to valid range and convert back to uint8
     result = np.clip(result, 0, 255).astype(np.uint8)
+
+    # Debug: Verify blur was actually applied by comparing pixel differences in masked area
+    mask_binary = mask > 127
+    if np.any(mask_binary):
+        diff = np.abs(result.astype(np.float32) - im0.astype(np.float32))
+        masked_diff = diff[mask_binary]
+        avg_diff = masked_diff.mean() if masked_diff.size > 0 else 0
+        if avg_diff < 1.0:
+            print(f"[apply_mask_blur] Warning: blur effect is minimal - avg pixel change={avg_diff:.2f}")
 
     return result
 
@@ -73,6 +88,7 @@ def blur_segmentation(im0, segmentation_mask, blur_ratio, progressive_blur=0):
         Modified image with segmentation-based blur applied
     """
     if segmentation_mask is None or segmentation_mask.size == 0:
+        print(f"[blur_segmentation] Skipping: mask is None or empty")
         return im0
 
     # Handle multi-dimensional masks (take first channel if needed)
@@ -85,14 +101,43 @@ def blur_segmentation(im0, segmentation_mask, blur_ratio, progressive_blur=0):
     else:
         segmentation_mask = segmentation_mask.astype(np.uint8)
 
+    # Check if mask has any non-zero values
+    mask_sum = segmentation_mask.sum()
+    if mask_sum == 0:
+        print(f"[blur_segmentation] Warning: mask is all zeros, skipping")
+        return im0
+
     # Ensure mask is the same size as the image
     # Use INTER_NEAREST to preserve binary mask edges (no interpolation artifacts)
+    original_shape = segmentation_mask.shape
     if segmentation_mask.shape[:2] != im0.shape[:2]:
+        print(f"[blur_segmentation] Resizing mask from {original_shape} to {im0.shape[:2]}")
         segmentation_mask = cv2.resize(
             segmentation_mask,
             (im0.shape[1], im0.shape[0]),
             interpolation=cv2.INTER_NEAREST
         )
+        # Check mask again after resize
+        if segmentation_mask.sum() == 0:
+            print(f"[blur_segmentation] Warning: mask became all zeros after resize "
+                  f"from {original_shape} to {segmentation_mask.shape}")
+            return im0
+
+    # Calculate mask coverage
+    total_pixels = segmentation_mask.shape[0] * segmentation_mask.shape[1]
+    nonzero_pixels = np.count_nonzero(segmentation_mask)
+    high_value_pixels = np.count_nonzero(segmentation_mask > 127)  # Pixels with significant blur
+    coverage_pct = (nonzero_pixels / total_pixels) * 100
+    active_pct = (high_value_pixels / total_pixels) * 100
+
+    # Find bounding box of the mask for debugging
+    nonzero_coords = np.argwhere(segmentation_mask > 0)
+    if len(nonzero_coords) > 0:
+        y_min, x_min = nonzero_coords.min(axis=0)
+        y_max, x_max = nonzero_coords.max(axis=0)
+        print(f"[blur_segmentation] Mask coverage: {coverage_pct:.2f}% ({nonzero_pixels} px), "
+              f"active (>127): {active_pct:.2f}% ({high_value_pixels} px), "
+              f"bbox: x={x_min}-{x_max}, y={y_min}-{y_max}")
 
     return apply_mask_blur(im0, segmentation_mask, blur_ratio, progressive_blur)
 
