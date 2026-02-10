@@ -34,26 +34,30 @@ def setup_sam3_hf_environment():
     """
     Setup HuggingFace environment variables for SAM3 model loading.
     Reads the token from the SAM3 models directory and configures HF cache.
-    """
-    # Get SAM3 directory from centralized config
-    sam3_dir = MODEL_PATHS.get('vision', {}).get('sam')
-    if sam3_dir:
-        sam3_dir = Path(sam3_dir) / 'sam3'
-    else:
-        sam3_dir = AI_MODELS_DIR / 'models' / 'vision' / 'sam' / 'sam3'
 
-    # Check for token file in SAM3 directory
-    token_file = sam3_dir / 'token'
+    HuggingFace expects cache structure: HF_HUB_CACHE/models--facebook--sam3/
+    So HF_HUB_CACHE must point to the parent directory (e.g. models/vision/sam/).
+    """
+    # Get SAM root directory (contains models--facebook--sam3/)
+    sam_root = MODEL_PATHS.get('vision', {}).get('sam')
+    if sam_root:
+        sam_root = Path(sam_root)
+    else:
+        sam_root = AI_MODELS_DIR / 'models' / 'vision' / 'sam'
+
+    # HF cache dir for SAM3 model (matches hf_hub_download naming convention)
+    sam3_cache_dir = sam_root / 'models--facebook--sam3'
+
+    # Check for token file in SAM3 cache directory
+    token_file = sam3_cache_dir / 'token'
     if token_file.exists():
         try:
             token = token_file.read_text().strip()
             if token:
-                # Set HuggingFace token environment variable
                 os.environ['HF_TOKEN'] = token
                 os.environ['HUGGING_FACE_HUB_TOKEN'] = token
                 logger.info(f"[SAM3] HuggingFace token loaded from {token_file}")
 
-                # Also try to save it to the standard location for huggingface_hub
                 try:
                     from huggingface_hub import HfFolder
                     HfFolder.save_token(token)
@@ -64,12 +68,26 @@ def setup_sam3_hf_environment():
         except Exception as e:
             logger.warning(f"[SAM3] Could not read token from {token_file}: {e}")
 
-    # Set HuggingFace cache to SAM3 directory
-    if sam3_dir.exists():
-        # Configure HF to use SAM3 directory as cache
-        os.environ['HF_HOME'] = str(sam3_dir.parent)
-        os.environ['HF_HUB_CACHE'] = str(sam3_dir.parent)
-        logger.info(f"[SAM3] HuggingFace cache set to: {sam3_dir.parent}")
+    # Point HF cache to sam_root so it finds models--facebook--sam3/ inside
+    if sam3_cache_dir.exists():
+        sam_root_str = str(sam_root)
+        os.environ['HF_HOME'] = sam_root_str
+        os.environ['HF_HUB_CACHE'] = sam_root_str
+        os.environ['HUGGINGFACE_HUB_CACHE'] = sam_root_str
+
+        # CRITICAL: huggingface_hub caches these values at import time in module
+        # constants. If the library was already imported (e.g. by Django startup),
+        # changing os.environ has no effect. We must patch the constants directly.
+        try:
+            import huggingface_hub.constants as hf_constants
+            hf_constants.HF_HOME = sam_root_str
+            hf_constants.HF_HUB_CACHE = sam_root_str
+            hf_constants.HUGGINGFACE_HUB_CACHE = sam_root_str
+            logger.info(f"[SAM3] HuggingFace cache patched to: {sam_root_str}")
+        except (ImportError, AttributeError) as e:
+            logger.warning(f"[SAM3] Could not patch huggingface_hub constants: {e}")
+
+        logger.info(f"[SAM3] HuggingFace env set to: {sam_root_str}")
 
 
 class SAM3Processor:
